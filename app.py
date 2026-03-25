@@ -1,135 +1,124 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+import yfinance as yf
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.historical import StockHistoricalDataClient
 from datetime import datetime, timedelta, timezone
-import yfinance as yf  # Добавляем для Real-time данных
+import re
 
-# --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
-st.set_page_config(page_title="Ultra AI Terminal", layout="wide")
-st.title("🦅 Ultra Trading Terminal: Alpaca + Real-Time Bridge")
+# --- НАСТРОЙКИ ТЕРМИНАЛА ---
+st.set_page_config(page_title="Eagle Eye Terminal", layout="wide", page_icon="🦅")
+st.title("🦅 Eagle Eye: Универсальный ИИ-Терминал")
 
-# --- ФУНКЦИИ ПАРСИНГА FINVIZ ---
-FINVIZ_SIGNALS = {
-    "Top Gainers": "ta_topgainers",
-    "Top Losers": "ta_toplosers",
-    "New High": "ta_newhigh",
-    "New Low": "ta_newlow",
-    "Most Volatile": "ta_mostvolatile",
-    "Most Active": "ta_mostactive",
-    "Overbought": "ta_overbought",
-    "Oversold": "ta_oversold"
-}
+# --- СИСТЕМНЫЙ ФУНКЦИОНАЛ ---
 
-def get_finviz_tickers(signal_key):
-    signal_value = FINVIZ_SIGNALS[signal_key]
-    url = f"https://finviz.com/screener.ashx?v=111&s={signal_value}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+def extract_tickers(text):
+    """ТРИЗ-РЕШЕНИЕ: Извлекает тикеры из любого текстового мусора"""
+    # Ищем слова из 1-5 заглавных букв
+    potential_tickers = re.findall(r'\b[A-Z]{1,5}\b', text)
+    # Исключаем общие слова
+    exclude = {'USD', 'VOL', 'LOW', 'HIGH', 'OPEN', 'CLOSE', 'P/E', 'EPS', 'CEO', 'NYSE', 'AMEX', 'NASD'}
+    return sorted(list(set(t for t in potential_tickers if t not in exclude)))
+
+@st.cache_data(ttl=60) # Кэшируем на 1 минуту для скорости
+def get_realtime_data(tickers):
+    """Получение мгновенных данных через Yahoo Finance Bridge"""
+    data = []
+    if not tickers: return pd.DataFrame()
+    
+    # Запрос сразу пачкой (намного быстрее)
+    tickers_str = " ".join(tickers)
     try:
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        tickers = [link.text for link in soup.find_all('a', class_='screener-link-primary')]
-        return list(set(tickers))
-    except Exception as e:
-        st.error(f"Ошибка парсинга Finviz: {e}")
-        return []
+        stocks = yf.download(tickers_str, period="1d", interval="1m", group_by='ticker', prepost=True, threads=True)
+        for ticker in tickers:
+            try:
+                if len(tickers) == 1:
+                    last_price = stocks['Close'].iloc[-1]
+                    open_price = stocks['Open'].iloc[0]
+                else:
+                    last_price = stocks[ticker]['Close'].iloc[-1]
+                    open_price = stocks[ticker]['Open'].iloc[0]
+                
+                chg = ((last_price - open_price) / open_price) * 100
+                data.append({"Тикер": ticker, "Live Price": round(last_price, 2), "Day Chg %": round(chg, 2)})
+            except: continue
+    except: pass
+    return pd.DataFrame(data)
 
-# --- БОКОВАЯ ПАНЕЛЬ ---
+# --- ИНТЕРФЕЙС: БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
-    st.header("🔐 Доступ")
-    default_key = st.secrets.get("ALPACA_API_KEY", "")
-    default_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
-    api_key = st.text_input("Alpaca Key", value=default_key, type="password")
-    secret_key = st.text_input("Alpaca Secret", value=default_secret, type="password")
+    st.header("🔑 Доступы")
+    a_key = st.text_input("Alpaca Key", value=st.secrets.get("ALPACA_API_KEY", ""), type="password")
+    a_sec = st.text_input("Alpaca Secret", value=st.secrets.get("ALPACA_SECRET_KEY", ""), type="password")
     
     st.divider()
-    st.header("🎯 Источник данных")
-    source_type = st.radio("Выбрать акции из:", ["Finviz Signals", "Индексы", "Свой список"])
-    
-    if source_type == "Finviz Signals":
-        category = st.selectbox("Категория Finviz", list(FINVIZ_SIGNALS.keys()))
-    elif source_type == "Индексы":
-        category = st.selectbox("Индекс", ["S&P 500", "NASDAQ 100"])
-    else:
-        manual_tickers = st.text_area("Введите тикеры (через пробел)")
+    st.header("⚙️ Режим отбора")
+    mode = st.radio("Как загрузить акции?", ["Умная вставка (Finviz/TV)", "Ручной ввод"])
 
-# --- ОСНОВНАЯ ЛОГИКА ---
-if api_key and secret_key:
-    client = StockHistoricalDataClient(api_key, secret_key)
-    tab_scan, tab_analysis = st.tabs(["🔍 Поиск инструментов", "📊 Анализ для ИИ"])
+# --- ГЛАВНЫЙ ИНТЕРФЕЙС ---
+if a_key and a_sec:
+    client = StockHistoricalDataClient(a_key, a_sec)
+    tab1, tab2 = st.tabs(["🎯 Шаг 1: Отбор и Скринер", "🔬 Шаг 2: ИИ Анализ"])
 
-    with tab_scan:
-        if st.button("🚀 Получить актуальный список и цены (15m delay)", use_container_width=True):
-            with st.spinner('Синхронизация...'):
-                if source_type == "Finviz Signals":
-                    tickers = get_finviz_tickers(category)
-                elif source_type == "Индексы":
-                    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies" if category == "S&P 500" else "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
-                    tickers = pd.read_html(url)[0]['Symbol' if 'Symbol' in pd.read_html(url)[0].columns else 'Ticker'].tolist()[:100]
-                else:
-                    tickers = manual_tickers.upper().split()
+    with tab1:
+        st.subheader("Загрузка инструментов")
+        if mode == "Умная вставка (Finviz/TV)":
+            raw_text = st.text_area("Скопируйте всё (Ctrl+A -> Ctrl+V) с Finviz или любого сайта сюда:", height=150)
+            target_tickers = extract_tickers(raw_text)
+        else:
+            target_tickers = st.text_input("Введите тикеры через пробел:").upper().split()
 
-                if tickers:
-                    snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=tickers))
-                    res_list = []
-                    for s, res in snaps.items():
-                        if res.daily_bar:
-                            change = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
-                            res_list.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(change, 2), "Объем": res.daily_bar.volume})
-                    
-                    st.session_state.last_df = pd.DataFrame(res_list).sort_values("Изм %", ascending=False)
-                    st.success(f"Найдено {len(tickers)} акций")
-                else:
-                    st.warning("Тикеры не найдены.")
+        if target_tickers:
+            st.success(f"Обнаружено тикеров: {len(target_tickers)}")
+            
+            if st.button("⚡ ПОЛУЧИТЬ LIVE-КОТИРОВКИ (0 мин задержки)"):
+                with st.spinner("Связь с биржей..."):
+                    df_live = get_realtime_data(target_tickers)
+                    if not df_live.empty:
+                        st.session_state.current_pool = df_live
+                    else:
+                        st.error("Не удалось получить данные. Проверьте тикеры.")
 
-        if 'last_df' in st.session_state:
-            st.dataframe(st.session_state.last_df, use_container_width=True)
-            st.code("ОТЧЕТ ДЛЯ ИИ:\n" + st.session_state.last_df.to_string())
+        if 'current_pool' in st.session_state:
+            st.dataframe(st.session_state.current_pool, use_container_width=True)
+            
+            # Отчет по пулу
+            pool_report = "LIVE MARKET REPORT:\n" + st.session_state.current_pool.to_string(index=False)
+            st.code(pool_report)
 
-    with tab_analysis:
-        target = st.text_input("Введите тикер:", key="analysis_target").upper()
-        
+    with tab2:
+        target = st.text_input("Тикер для глубокого анализа:").upper()
         if target:
-            # КНОПКА ДЛЯ REAL-TIME ЦЕНЫ (БЕЗ ЗАДЕРЖКИ)
-            if st.button("⚡ ПОЛУЧИТЬ ЦЕНУ В РЕАЛЬНОМ ВРЕМЕНИ (0 min delay)"):
-                try:
-                    ticker_yf = yf.Ticker(target)
-                    realtime_data = ticker_yf.fast_info
-                    st.success(f"Мгновенная цена {target} (Yahoo Real-time): ${round(realtime_data.last_price, 2)}")
-                    st.session_state.rt_price = round(realtime_data.last_price, 2)
-                except:
-                    st.error("Не удалось получить Real-time данные.")
-
             try:
-                now = datetime.now(timezone.utc)
-                d_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Day, start=now-timedelta(days=30))).df
-                m_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Minute, start=now-timedelta(hours=8))).df
-                
-                if isinstance(d_bars.index, pd.MultiIndex): d_bars = d_bars.loc[target]
-                if isinstance(m_bars.index, pd.MultiIndex): m_bars = m_bars.loc[target]
+                # Получаем данные
+                with st.spinner("Загрузка структуры графика..."):
+                    now = datetime.now(timezone.utc)
+                    # Alpaca для структуры (она надежнее для истории)
+                    d_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Day, start=now-timedelta(days=30))).df
+                    m_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Minute, start=now-timedelta(hours=6))).df
+                    
+                    if isinstance(d_bars.index, pd.MultiIndex): d_bars = d_bars.loc[target]
+                    if isinstance(m_bars.index, pd.MultiIndex): m_bars = m_bars.loc[target]
 
-                st.subheader(f"Технический срез: {target}")
-                
-                # Показываем разницу, если нажали Real-time кнопку
-                if 'rt_price' in st.session_state:
-                    st.info(f"Сравнение: Alpaca (delayed): ${m_bars['close'].iloc[-1]} | REAL-TIME: ${st.session_state.rt_price}")
+                    # Получаем Real-time хвост через Yahoo
+                    yt = yf.Ticker(target)
+                    rt_price = yt.fast_info.last_price
 
-                col1, col2 = st.columns(2)
-                col1.write("Daily (Last 7d)")
-                col1.dataframe(d_bars[['open', 'high', 'low', 'close']].tail(7))
-                col2.write("Minute (Last 15m)")
-                col2.dataframe(m_bars[['open', 'close', 'volume']].tail(15))
+                    st.metric(f"Цена {target} (REAL-TIME)", f"${round(rt_price, 2)}", f"{round(((rt_price/d_bars['close'].iloc[-2])-1)*100, 2)}%")
 
-                # Добавляем в текст для ИИ пометку о Real-time цене
-                rt_str = f" [REAL-TIME NOW: ${st.session_state.rt_price}]" if 'rt_price' in st.session_state else ""
-                ai_final = f"ДАННЫЕ ПО {target}{rt_str}\n\nDaily:\n{d_bars.tail(7).to_string()}\n\nMinute:\n{m_bars.tail(15).to_string()}"
-                
-                st.subheader("📋 Данные для копирования (Индивидуально)")
-                st.code(ai_final, language="text")
+                    c1, c2 = st.columns(2)
+                    c1.write("📅 Дневные свечи")
+                    c1.table(d_bars[['open', 'high', 'low', 'close']].tail(7))
+                    c2.write("⏱️ Минутки (Delayed)")
+                    c2.table(m_bars[['open', 'close', 'volume']].tail(10))
+
+                    # Генерируем финальный отчет для ИИ
+                    ai_final = f"AI ANALYSIS: {target}\nREAL-TIME PRICE: {round(rt_price, 2)}\n\n"
+                    ai_final += f"HISTORICAL DAILY:\n{d_bars.tail(7).to_string()}\n\n"
+                    ai_final += f"RECENT MINUTES:\n{m_bars.tail(15).to_string()}"
+                    st.code(ai_final)
             except Exception as e:
-                st.error(f"Ошибка сбора данных по {target}: {e}")
+                st.error(f"Ошибка: {e}")
 else:
-    st.info("Введите API ключи слева.")
+    st.info("Введите ключи в боковой панели.")
