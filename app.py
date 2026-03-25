@@ -167,6 +167,16 @@ if api_key and secret_key:
                     st.error(f"Ошибка Турбо-сбора: {e}")
             else:
                 st.warning("Сначала введите тикер.")
+# Логика генерации ссылки на Investing.com
+# Для большинства акций США ссылка имеет формат: инвестинг/equities/ticker-name
+# Мы сделаем упрощенную универсальную ссылку на поиск
+investing_link = f"https://www.investing.com/search/?q={t_target}"
+
+# Выводим в интерфейс под кодом для копирования
+st.markdown(f"🔗 **[Открыть график {t_target} на Investing.com]({investing_link})**")
+
+# Дополняем итоговый текст для копирования ссылкой
+full_turbo_report += f"\n--- VISUAL ANALYSIS LINK ---\n{investing_link}\n"
 
 else:
     st.info("Введите API ключи Alpaca в боковой панели.")
