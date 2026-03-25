@@ -1,5 +1,7 @@
 streamlit
 pandas
+requests
 alpaca-py
 lxml
+beautifulsoup4
 
