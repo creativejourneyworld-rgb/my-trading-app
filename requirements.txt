@@ -7,5 +7,3 @@ beautifulsoup4
 yfinance
 plotly
 pandas_ta
-
-
