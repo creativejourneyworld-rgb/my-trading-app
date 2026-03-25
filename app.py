@@ -1,16 +1,17 @@
+
 import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit # Добавили TimeFrameUnit
 from alpaca.data.historical import StockHistoricalDataClient
 from datetime import datetime, timedelta, timezone
 import re
 
 # --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
 st.set_page_config(page_title="Eagle Turbo AI Terminal", layout="wide", page_icon="🚀")
-st.title("🦅 Eagle AI Terminal: Turbo Mode v4.0")
+st.title("🦅 Eagle AI Terminal: Turbo Mode v4.1 (Fixed)")
 
 # --- СИСТЕМНЫЕ ФУНКЦИИ ---
 
@@ -35,7 +36,7 @@ def get_indices_stable(index_name):
         return []
 
 def safe_get_bars(client, ticker, timeframe, start_time):
-    """Безопасное получение баров с обработкой MultiIndex"""
+    """Безопасное получение баров с обработкой MultiIndex и пустых ответов"""
     try:
         req = StockBarsRequest(
             symbol_or_symbols=ticker,
@@ -43,11 +44,15 @@ def safe_get_bars(client, ticker, timeframe, start_time):
             start=start_time,
             feed='iex'
         )
-        df = client.get_stock_bars(req).df
+        data = client.get_stock_bars(req)
+        if not data or data.df.empty:
+            return pd.DataFrame()
+        
+        df = data.df
         if isinstance(df.index, pd.MultiIndex):
             return df.loc[ticker]
         return df
-    except:
+    except Exception:
         return pd.DataFrame()
 
 # --- ТУРБО ФУНКЦИЯ ---
@@ -57,12 +62,12 @@ def fetch_turbo_package(client, ticker):
     now = datetime.now(timezone.utc)
     
     with st.spinner(f"🚀 Запуск Турбо-двигателя для {ticker}..."):
-        # Определяем горизонты
+        # Исправленные таймфреймы
         packages = {
             "MONTHLY (2Y)": {"tf": TimeFrame.Month, "days": 730},
             "DAILY (1Y)": {"tf": TimeFrame.Day, "days": 365},
             "HOURLY (2M)": {"tf": TimeFrame.Hour, "days": 60},
-            "5-MINUTE (2W)": {"tf": TimeFrame.Minute * 5, "days": 14},
+            "5-MINUTE (2W)": {"tf": TimeFrame(5, TimeFrameUnit.Minute), "days": 14}, # ИСПРАВЛЕНО
             "1-MINUTE (3D)": {"tf": TimeFrame.Minute, "days": 3}
         }
         
@@ -101,14 +106,17 @@ if api_key and secret_key:
                 st.session_state.target_tickers = get_indices_stable(category)
         
         if 'target_tickers' in st.session_state and st.session_state.target_tickers:
-            snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=st.session_state.target_tickers, feed='iex'))
-            rows = []
-            for s, res in snaps.items():
-                if res.daily_bar:
-                    chg = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
-                    rows.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(chg, 2), "Объем": res.daily_bar.volume})
-            st.session_state.last_df = pd.DataFrame(rows).sort_values("Изм %", ascending=False)
-            st.dataframe(st.session_state.last_df, use_container_width=True)
+            try:
+                snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=st.session_state.target_tickers, feed='iex'))
+                rows = []
+                for s, res in snaps.items():
+                    if res.daily_bar:
+                        chg = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
+                        rows.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(chg, 2), "Объем": res.daily_bar.volume})
+                st.session_state.last_df = pd.DataFrame(rows).sort_values("Изм %", ascending=False)
+                st.dataframe(st.session_state.last_df, use_container_width=True)
+            except Exception as e:
+                st.error(f"Ошибка получения снимка рынка: {e}")
 
     # ВКЛАДКА 2: ОБЫЧНЫЙ АНАЛИЗ
     with tab_analysis:
@@ -118,11 +126,15 @@ if api_key and secret_key:
                 now = datetime.now(timezone.utc)
                 d_bars = safe_get_bars(client, target, TimeFrame.Day, now - timedelta(days=30))
                 m_bars = safe_get_bars(client, target, TimeFrame.Minute, now - timedelta(hours=8))
-                st.subheader(f"Срез по {target}")
-                col1, col2 = st.columns(2)
-                col1.dataframe(d_bars.tail(7))
-                col2.dataframe(m_bars.tail(15))
-            except: st.error("Ошибка получения данных")
+                if not d_bars.empty:
+                    st.subheader(f"Срез по {target}")
+                    col1, col2 = st.columns(2)
+                    col1.dataframe(d_bars.tail(7))
+                    col2.dataframe(m_bars.tail(15))
+                else:
+                    st.warning("Данные по этому тикеру не найдены.")
+            except Exception as e: 
+                st.error(f"Ошибка: {e}")
 
     # ВКЛАДКА 3: ТУРБО-РЕЖИМ
     with tab_turbo:
@@ -131,27 +143,33 @@ if api_key and secret_key:
         
         if st.button("🚀 ЗАПУСТИТЬ ТУРБО-СБОР", use_container_width=True):
             if t_target:
-                data_package = fetch_turbo_package(client, t_target)
-                
-                # Отображение данных в интерфейсе
-                st.success(f"Данные по {t_target} успешно собраны!")
-                
-                # Создаем компактный отчет для копирования
-                full_turbo_report = f"--- TURBO DATA PACKAGE: {t_target} ---\n"
-                full_turbo_report += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
-                
-                for label, df in data_package.items():
-                    with st.expander(f"Просмотр {label}"):
-                        st.dataframe(df.tail(20), use_container_width=True)
+                try:
+                    data_package = fetch_turbo_package(client, t_target)
                     
-                    # Добавляем в текстовый отчет (последние срезы для ИИ)
-                    full_turbo_report += f"[{label}]\n{df.tail(10).to_string()}\n\n"
-                
-                st.divider()
-                st.subheader("📋 КОПИРОВАТЬ ДЛЯ ИИ (TURBO REPORT)")
-                st.code(full_turbo_report, language="text")
+                    st.success(f"Данные по {t_target} успешно собраны!")
+                    
+                    full_turbo_report = f"--- TURBO DATA PACKAGE: {t_target} ---\n"
+                    full_turbo_report += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
+                    
+                    for label, df in data_package.items():
+                        with st.expander(f"Просмотр {label}"):
+                            if not df.empty:
+                                st.dataframe(df.tail(20), use_container_width=True)
+                                full_turbo_report += f"[{label}]\n{df.tail(10).to_string()}\n\n"
+                            else:
+                                st.write("Данные отсутствуют.")
+                                full_turbo_report += f"[{label}]\nDATA NOT FOUND\n\n"
+                    
+                    st.divider()
+                    st.subheader("📋 КОПИРОВАТЬ ДЛЯ ИИ (TURBO REPORT)")
+                    st.code(full_turbo_report, language="text")
+                except Exception as e:
+                    st.error(f"Ошибка Турбо-сбора: {e}")
             else:
                 st.warning("Сначала введите тикер.")
 
 else:
     st.info("Введите API ключи Alpaca в боковой панели.")
+
+
+
