@@ -5,5 +5,7 @@ alpaca-py
 lxml
 beautifulsoup4
 yfinance
+plotly
+pandas_ta
 
 
