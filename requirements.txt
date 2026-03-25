@@ -1,9 +1,8 @@
 streamlit
 pandas
-requests
 alpaca-py
-lxml
+requests
 beautifulsoup4
-yfinance
+lxml
 plotly
 pandas_ta
