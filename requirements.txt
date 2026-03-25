@@ -4,4 +4,6 @@ requests
 alpaca-py
 lxml
 beautifulsoup4
+yfinance
+
 
