@@ -5,24 +5,23 @@ from bs4 import BeautifulSoup
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.enums import DataFeed
 from datetime import datetime, timedelta, timezone
 import re
 
 # --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
-st.set_page_config(page_title="Eagle Real-Time Terminal", layout="wide")
-st.title("🦅 Eagle AI Terminal: Real-Time (IEX) + Smart Batch")
+st.set_page_config(page_title="Eagle Turbo AI Terminal", layout="wide", page_icon="🚀")
+st.title("🦅 Eagle AI Terminal: Turbo Mode v4.0")
 
 # --- СИСТЕМНЫЕ ФУНКЦИИ ---
 
 def extract_tickers(text):
-    """ТРИЗ: Извлечение тикеров из любого мусора"""
-    potential_tickers = re.findall(r'\b[A-Z]{1,5}\b', text)
+    """Извлечение тикеров из любого текста"""
+    potential = re.findall(r'\b[A-Z]{1,5}\b', text)
     exclude = {'USD', 'VOL', 'LOW', 'HIGH', 'OPEN', 'CLOSE', 'P/E', 'EPS', 'CEO', 'NYSE', 'AMEX', 'NASD', 'DATE', 'TIME', 'BUY', 'SELL'}
-    return sorted(list(set(t for t in potential_tickers if t not in exclude)))
+    return sorted(list(set(t for t in potential if t not in exclude)))
 
 def get_indices_stable(index_name):
-    """Исправленный метод получения индексов (обходим 403 ошибку)"""
+    """Получение индексов через Wikipedia (с обходом 403)"""
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies" if index_name == "S&P 500" else "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
     try:
@@ -30,109 +29,129 @@ def get_indices_stable(index_name):
         tables = pd.read_html(response.text)
         df = tables[0]
         col = 'Symbol' if 'Symbol' in df.columns else 'Ticker'
-        return df[col].tolist()[:100] # Берем топ-100 для скорости
+        return df[col].tolist()[:100]
     except Exception as e:
         st.error(f"Ошибка доступа к Wiki: {e}")
         return []
 
-def fetch_detailed_data(client, ticker):
-    """Вспомогательная функция для сбора Daily + Minute данных"""
+def safe_get_bars(client, ticker, timeframe, start_time):
+    """Безопасное получение баров с обработкой MultiIndex"""
+    try:
+        req = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=timeframe,
+            start=start_time,
+            feed='iex'
+        )
+        df = client.get_stock_bars(req).df
+        if isinstance(df.index, pd.MultiIndex):
+            return df.loc[ticker]
+        return df
+    except:
+        return pd.DataFrame()
+
+# --- ТУРБО ФУНКЦИЯ ---
+
+def fetch_turbo_package(client, ticker):
+    """Сбор МАКСИМАЛЬНОЙ информации по тикеру по всем таймфреймам"""
     now = datetime.now(timezone.utc)
-    # Используем feed='iex' для Real-Time данных на бесплатном тарифе
-    d_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=ticker, timeframe=TimeFrame.Day, start=now-timedelta(days=30), feed='iex')).df
-    m_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=ticker, timeframe=TimeFrame.Minute, start=now-timedelta(hours=8), feed='iex')).df
     
-    if isinstance(d_bars.index, pd.MultiIndex): d_bars = d_bars.loc[ticker]
-    if isinstance(m_bars.index, pd.MultiIndex): m_bars = m_bars.loc[ticker]
-    return d_bars, m_bars
+    with st.spinner(f"🚀 Запуск Турбо-двигателя для {ticker}..."):
+        # Определяем горизонты
+        packages = {
+            "MONTHLY (2Y)": {"tf": TimeFrame.Month, "days": 730},
+            "DAILY (1Y)": {"tf": TimeFrame.Day, "days": 365},
+            "HOURLY (2M)": {"tf": TimeFrame.Hour, "days": 60},
+            "5-MINUTE (2W)": {"tf": TimeFrame.Minute * 5, "days": 14},
+            "1-MINUTE (3D)": {"tf": TimeFrame.Minute, "days": 3}
+        }
+        
+        turbo_data = {}
+        for label, params in packages.items():
+            start = now - timedelta(days=params["days"])
+            df = safe_get_bars(client, ticker, params["tf"], start)
+            turbo_data[label] = df
+            
+        return turbo_data
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
-    st.header("🔐 Доступ Alpaca")
-    default_key = st.secrets.get("ALPACA_API_KEY", "")
-    default_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
-    api_key = st.text_input("API Key", value=default_key, type="password")
-    secret_key = st.text_input("Secret Key", value=default_secret, type="password")
+    st.header("🔐 Ключи Alpaca")
+    api_key = st.text_input("API Key", value=st.secrets.get("ALPACA_API_KEY", ""), type="password")
+    secret_key = st.text_input("Secret Key", value=st.secrets.get("ALPACA_SECRET_KEY", ""), type="password")
     
     st.divider()
-    st.header("🎯 Источник")
-    source_type = st.radio("Метод:", ["Умная вставка", "Индексы", "Свой список"])
-    
+    source_type = st.radio("Метод выбора:", ["Умная вставка", "Индексы", "Свой список"])
     if source_type == "Индексы":
         category = st.selectbox("Индекс", ["S&P 500", "NASDAQ 100"])
-    elif source_type == "Свой список":
-        manual_tickers = st.text_area("Тикеры через пробел")
 
-# --- ОСНОВНАЯ ЛОГИКА ---
+# --- ЛОГИКА ---
 if api_key and secret_key:
     client = StockHistoricalDataClient(api_key, secret_key)
-    tab_scan, tab_analysis = st.tabs(["🔍 Поиск и Пул", "📊 Детальный Анализ"])
+    tab_scan, tab_analysis, tab_turbo = st.tabs(["🔍 Скринер", "📊 Анализ", "🚀 ТУРБО"])
 
+    # ВКЛАДКА 1: СКРИНЕР
     with tab_scan:
         if source_type == "Умная вставка":
-            raw_text = st.text_area("Вставь сюда текст с Finviz/TradingView:", height=150)
-            if st.button("🚀 Извлечь и получить котировки (LIVE IEX)", use_container_width=True):
+            raw_text = st.text_area("Вставь текст (Finviz/TV):", height=150)
+            if st.button("🚀 Получить котировки (Real-Time IEX)"):
                 st.session_state.target_tickers = extract_tickers(raw_text)
         elif source_type == "Индексы":
-            if st.button("🚀 Загрузить индекс (LIVE IEX)", use_container_width=True):
+            if st.button("🚀 Загрузить Индекс"):
                 st.session_state.target_tickers = get_indices_stable(category)
-        else:
-            if st.button("🚀 Загрузить список", use_container_width=True):
-                st.session_state.target_tickers = manual_tickers.upper().split()
-
-        # Получение Snapshot (Живые цены)
+        
         if 'target_tickers' in st.session_state and st.session_state.target_tickers:
-            try:
-                # ВАЖНО: feed='iex' дает 0 минут задержки для бесплатных ключей
-                snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=st.session_state.target_tickers, feed='iex'))
-                res_list = []
-                for s, res in snaps.items():
-                    if res.daily_bar:
-                        change = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
-                        res_list.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(change, 2), "Объем": res.daily_bar.volume})
-                
-                st.session_state.last_df = pd.DataFrame(res_list).sort_values("Изм %", ascending=False)
-                st.dataframe(st.session_state.last_df, use_container_width=True)
+            snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=st.session_state.target_tickers, feed='iex'))
+            rows = []
+            for s, res in snaps.items():
+                if res.daily_bar:
+                    chg = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
+                    rows.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(chg, 2), "Объем": res.daily_bar.volume})
+            st.session_state.last_df = pd.DataFrame(rows).sort_values("Изм %", ascending=False)
+            st.dataframe(st.session_state.last_df, use_container_width=True)
 
-                # КНОПКИ ДЕЙСТВИЙ С ПУЛОМ
-                col_pool1, col_pool2 = st.columns(2)
-                
-                with col_pool1:
-                    if st.button("📦 Сформировать ОТЧЕТ ПО ВСЕМУ ПУЛУ (Daily+Min)"):
-                        with st.spinner("Сбор мега-отчета..."):
-                            full_report = "--- МЕГА-ОТЧЕТ ПО ПУЛУ ДЛЯ ИИ ---\n\n"
-                            for t in st.session_state.target_tickers[:10]: # Ограничение 10 для стабильности
-                                try:
-                                    d, m = fetch_detailed_data(client, t)
-                                    full_report += f"=== {t} ===\nDAILY:\n{d.tail(5).to_string()}\nMINUTE:\n{m.tail(10).to_string()}\n\n"
-                                except: continue
-                            st.code(full_report)
-
-                with col_pool2:
-                    selected_from_list = st.selectbox("Выбрать для детального анализа:", st.session_state.target_tickers)
-                    if st.button("🔎 Получить данные по акции"):
-                        st.session_state.analysis_target = selected_from_list
-                        st.info(f"Акция {selected_from_list} готова во второй вкладке!")
-
-            except Exception as e:
-                st.error(f"Ошибка Alpaca: {e}")
-
+    # ВКЛАДКА 2: ОБЫЧНЫЙ АНАЛИЗ
     with tab_analysis:
-        # Либо вводим вручную, либо подхватываем из первой вкладки
-        target = st.text_input("Тикер для анализа:", value=st.session_state.get('analysis_target', ""), key="analysis_field").upper()
+        target = st.text_input("Тикер для быстрого анализа:", key="quick").upper()
         if target:
             try:
-                d_bars, m_bars = fetch_detailed_data(client, target)
-                st.subheader(f"Технический срез: {target} (REAL-TIME IEX)")
-                c1, c2 = st.columns(2)
-                c1.write("Daily (Last 7d)")
-                c1.dataframe(d_bars[['open', 'high', 'low', 'close']].tail(7))
-                c2.write("Minute (Last 15m)")
-                c2.dataframe(m_bars[['open', 'close', 'volume']].tail(15))
+                now = datetime.now(timezone.utc)
+                d_bars = safe_get_bars(client, target, TimeFrame.Day, now - timedelta(days=30))
+                m_bars = safe_get_bars(client, target, TimeFrame.Minute, now - timedelta(hours=8))
+                st.subheader(f"Срез по {target}")
+                col1, col2 = st.columns(2)
+                col1.dataframe(d_bars.tail(7))
+                col2.dataframe(m_bars.tail(15))
+            except: st.error("Ошибка получения данных")
 
-                ai_final = f"ДАННЫЕ ПО {target} (REAL-TIME IEX)\n\nDaily:\n{d_bars.tail(7).to_string()}\n\nMinute:\n{m_bars.tail(15).to_string()}"
-                st.code(ai_final, language="text")
-            except Exception as e:
-                st.error(f"Ошибка: {e}")
+    # ВКЛАДКА 3: ТУРБО-РЕЖИМ
+    with tab_turbo:
+        st.subheader("🔥 Максимально глубокий сбор данных (1 год + все ТФ)")
+        t_target = st.text_input("Введите тикер для ТУРБО-АНАЛИЗА:", key="turbo_t").upper()
+        
+        if st.button("🚀 ЗАПУСТИТЬ ТУРБО-СБОР", use_container_width=True):
+            if t_target:
+                data_package = fetch_turbo_package(client, t_target)
+                
+                # Отображение данных в интерфейсе
+                st.success(f"Данные по {t_target} успешно собраны!")
+                
+                # Создаем компактный отчет для копирования
+                full_turbo_report = f"--- TURBO DATA PACKAGE: {t_target} ---\n"
+                full_turbo_report += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
+                
+                for label, df in data_package.items():
+                    with st.expander(f"Просмотр {label}"):
+                        st.dataframe(df.tail(20), use_container_width=True)
+                    
+                    # Добавляем в текстовый отчет (последние срезы для ИИ)
+                    full_turbo_report += f"[{label}]\n{df.tail(10).to_string()}\n\n"
+                
+                st.divider()
+                st.subheader("📋 КОПИРОВАТЬ ДЛЯ ИИ (TURBO REPORT)")
+                st.code(full_turbo_report, language="text")
+            else:
+                st.warning("Сначала введите тикер.")
+
 else:
-    st.info("Введите API ключи Alpaca.")
+    st.info("Введите API ключи Alpaca в боковой панели.")
