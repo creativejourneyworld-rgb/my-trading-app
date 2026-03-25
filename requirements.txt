@@ -1,7 +1,7 @@
 streamlit
 pandas
-alpaca-py
 requests
+alpaca-py
+lxml
 beautifulsoup4
-plotly
-pandas-ta
+yfinance
