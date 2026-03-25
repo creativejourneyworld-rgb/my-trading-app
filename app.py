@@ -6,127 +6,161 @@ from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.historical import StockHistoricalDataClient
 from datetime import datetime, timedelta, timezone
+import re
 
-# --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
-st.set_page_config(page_title="Ultra AI Terminal", layout="wide")
-st.title("🦅 Ultra Trading Terminal: Alpaca + Finviz")
+# --- НАСТРОЙКИ СТРАНИЦЫ ---
+st.set_page_config(page_title="AI Alpha Terminal", layout="wide", page_icon="🦅")
+st.title("🦅 AI Alpha Terminal v2.0")
 
-# --- ФУНКЦИИ ПАРСИНГА FINVIZ ---
-FINVIZ_SIGNALS = {
-    "Top Gainers": "ta_topgainers",
-    "Top Losers": "ta_toplosers",
-    "New High": "ta_newhigh",
-    "New Low": "ta_newlow",
-    "Most Volatile": "ta_mostvolatile",
-    "Most Active": "ta_mostactive",
-    "Overbought": "ta_overbought",
-    "Oversold": "ta_oversold"
-}
+# --- СТИЛИЗАЦИЯ ---
+st.markdown("""
+    <style>
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007bff; color: white; }
+    .stDataFrame { border: 1px solid #333; }
+    </style>
+    """, unsafe_allow_html=True)
 
-def get_finviz_tickers(signal_key):
-    """Парсинг тикеров с Finviz по выбранному сигналу"""
-    signal_value = FINVIZ_SIGNALS[signal_key]
-    url = f"https://finviz.com/screener.ashx?v=111&s={signal_value}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    
+# --- ИНИЦИАЛИЗАЦИЯ SESSION STATE ---
+if 'ticker_list' not in st.session_state: st.session_state.ticker_list = []
+if 'movers_df' not in st.session_state: st.session_state.movers_df = pd.DataFrame()
+
+# --- ФУНКЦИИ КОРРЕКТИРОВКИ ТИКЕРОВ ---
+def clean_tickers(tickers):
+    """Очистка тикеров для Alpaca (замена BRK.B на BRK/B и т.д.)"""
+    cleaned = [str(t).strip().upper().replace('.', '/') for t in tickers if t]
+    return [t for t in cleaned if re.match(r'^[A-Z0-9/]+$', t)]
+
+# --- ПАРСЕРЫ ---
+def fetch_finviz(signal_key):
+    signals = {
+        "Top Gainers": "ta_topgainers", "Top Losers": "ta_toplosers",
+        "New High": "ta_newhigh", "Most Active": "ta_mostactive",
+        "Overbought": "ta_overbought", "Oversold": "ta_oversold"
+    }
+    url = f"https://finviz.com/screener.ashx?v=111&s={signals[signal_key]}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+    }
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.content, 'html.parser')
-        # Ищем таблицу с тикерами. На Finviz тикеры обычно в ссылках с классом screener-link-primary
-        tickers = []
-        links = soup.find_all('a', class_='screener-link-primary')
-        for link in links:
-            tickers.append(link.text)
-        return list(set(tickers)) # Убираем дубликаты
+        tickers = [a.text for a in soup.find_all('a', class_='screener-link-primary')]
+        return clean_tickers(tickers)
     except Exception as e:
-        st.error(f"Ошибка парсинга Finviz: {e}")
+        st.error(f"Finviz Error: {e}")
         return []
 
-# --- БОКОВАЯ ПАНЕЛЬ (КЛЮЧИ И НАСТРОЙКИ) ---
+def fetch_wikipedia(index_name):
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies" if index_name == "S&P 500" else "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
+    try:
+        df = pd.read_html(url)[0]
+        col = 'Symbol' if 'Symbol' in df.columns else 'Ticker'
+        return clean_tickers(df[col].tolist())
+    except Exception as e:
+        st.error(f"Wiki Error: {e}")
+        return []
+
+# --- БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
-    st.header("🔐 Доступ")
-    # Пробуем взять из Secrets, если нет - просим ввести
-    default_key = st.secrets.get("ALPACA_API_KEY", "")
-    default_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
-    
-    api_key = st.text_input("Alpaca Key", value=default_key, type="password")
-    secret_key = st.text_input("Alpaca Secret", value=default_secret, type="password")
+    st.header("🔑 Доступ")
+    api_key = st.text_input("Alpaca Key", value=st.secrets.get("ALPACA_API_KEY", ""), type="password")
+    secret_key = st.text_input("Alpaca Secret", value=st.secrets.get("ALPACA_SECRET_KEY", ""), type="password")
     
     st.divider()
-    st.header("🎯 Источник данных")
-    source_type = st.radio("Выбрать акции из:", ["Finviz Signals", "Индексы", "Свой список"])
+    st.header("🔍 Настройка выборки")
+    mode = st.radio("Источник:", ["Finviz", "Индексы", "Ручной ввод"])
     
-    if source_type == "Finviz Signals":
-        category = st.selectbox("Категория Finviz", list(FINVIZ_SIGNALS.keys()))
-    elif source_type == "Индексы":
-        category = st.selectbox("Индекс", ["S&P 500", "NASDAQ 100"])
+    if mode == "Finviz":
+        cat = st.selectbox("Категория:", ["Top Gainers", "Top Losers", "Most Active", "Oversold"])
+    elif mode == "Индексы":
+        cat = st.selectbox("Индекс:", ["S&P 500", "NASDAQ 100"])
     else:
-        manual_tickers = st.text_area("Введите тикеры (через пробел)")
+        manual = st.text_area("Тикеры (через пробел):")
 
-# --- ОСНОВНАЯ ЛОГИКА ---
+    if st.button("🚀 ШАГ 1: Загрузить список"):
+        with st.spinner("Получение тикеров..."):
+            if mode == "Finviz": st.session_state.ticker_list = fetch_finviz(cat)
+            elif mode == "Индексы": st.session_state.ticker_list = fetch_wikipedia(cat)
+            else: st.session_state.ticker_list = clean_tickers(manual.split())
+        
+        if st.session_state.ticker_list:
+            st.success(f"Загружено {len(st.session_state.ticker_list)} тикеров")
+        else:
+            st.error("Список пуст. Проверьте источник.")
+
+# --- ОСНОВНОЙ ЭКРАН ---
 if api_key and secret_key:
     client = StockHistoricalDataClient(api_key, secret_key)
-    tab_scan, tab_analysis = st.tabs(["🔍 Поиск инструментов", "📊 Анализ для ИИ"])
+    tab_scan, tab_analysis = st.tabs(["🚀 Скринер цен", "🔬 ИИ Анализ"])
 
-    # ВКЛАДКА 1: ПОИСК
     with tab_scan:
-        if st.button("🚀 Получить актуальный список и цены", use_container_width=True):
-            with st.spinner('Синхронизация с рынком...'):
-                # Определяем список тикеров
-                if source_type == "Finviz Signals":
-                    tickers = get_finviz_tickers(category)
-                elif source_type == "Индексы":
-                    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies" if category == "S&P 500" else "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
-                    tickers = pd.read_html(url)[0]['Symbol' if 'Symbol' in pd.read_html(url)[0].columns else 'Ticker'].tolist()[:100]
-                else:
-                    tickers = manual_tickers.upper().split()
+        if not st.session_state.ticker_list:
+            st.info("Сначала загрузите список тикеров в боковом меню 👈")
+        else:
+            if st.button("💰 ШАГ 2: Получить живые котировки"):
+                with st.status("Запрос данных из Alpaca...") as status:
+                    try:
+                        # Берем первые 100 для стабильности
+                        batch = st.session_state.ticker_list[:100]
+                        status.update(label=f"Запрос цен для {len(batch)} акций...")
+                        
+                        snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=batch))
+                        
+                        rows = []
+                        for s, res in snaps.items():
+                            if res.daily_bar and res.latest_trade:
+                                price = res.latest_trade.price
+                                open_p = res.daily_bar.open
+                                chg = ((price - open_p) / open_p) * 100
+                                rows.append({
+                                    "Ticker": s, "Price": price, 
+                                    "Change %": round(chg, 2), "Volume": res.daily_bar.volume
+                                })
+                        
+                        st.session_state.movers_df = pd.DataFrame(rows).sort_values("Change %", ascending=False)
+                        status.update(label="Готово!", state="complete")
+                    except Exception as e:
+                        st.error(f"Alpaca API Error: {e}")
 
-                if tickers:
-                    # Получаем Snapshot
-                    snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=tickers))
-                    res_list = []
-                    for s, res in snaps.items():
-                        if res.daily_bar:
-                            change = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
-                            res_list.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(change, 2), "Объем": res.daily_bar.volume})
-                    
-                    st.session_state.last_df = pd.DataFrame(res_list).sort_values("Изм %", ascending=False)
-                    st.success(f"Найдено {len(tickers)} акций в категории {category if source_type != 'Свой список' else ''}")
-                else:
-                    st.warning("Тикеры не найдены.")
-
-        if 'last_df' in st.session_state:
-            st.dataframe(st.session_state.last_df, use_container_width=True)
+        if not st.session_state.movers_df.empty:
+            st.dataframe(st.session_state.movers_df, use_container_width=True, height=400)
             
-            # Кнопка анализа всего ПУЛА
-            pool_text = "АНАЛИЗ ПУЛА АКЦИЙ:\n" + st.session_state.last_df.to_string()
-            st.subheader("📋 Отчет по всему списку для ИИ")
-            st.code(pool_text, language="text")
+            # Генерация отчета для ИИ
+            pool_report = f"MARKET SNAPSHOT ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n"
+            pool_report += st.session_state.movers_df.to_string(index=False)
+            st.subheader("📋 Данные пула для ИИ")
+            st.code(pool_report)
 
-    # ВКЛАДКА 2: АНАЛИЗ КОНКРЕТНОГО ТИКЕРА
     with tab_analysis:
-        target = st.text_input("Введите конкретный тикер из списка выше:", key="analysis_target").upper()
+        target = st.text_input("Введите тикер из списка выше для глубокого анализа:").upper()
         if target:
             try:
-                now = datetime.now(timezone.utc)
-                d_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Day, start=now-timedelta(days=30))).df
-                m_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Minute, start=now-timedelta(hours=8))).df
-                
-                if isinstance(d_bars.index, pd.MultiIndex): d_bars = d_bars.loc[target]
-                if isinstance(m_bars.index, pd.MultiIndex): m_bars = m_bars.loc[target]
+                with st.spinner("Загрузка графиков..."):
+                    now = datetime.now(timezone.utc)
+                    # Фикс для времени (Alpaca не любит будущее время)
+                    start_d = now - timedelta(days=45)
+                    
+                    d_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Day, start=start_d)).df
+                    m_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=target, timeframe=TimeFrame.Minute, start=now-timedelta(hours=8))).df
+                    
+                    if isinstance(d_bars.index, pd.MultiIndex): d_bars = d_bars.loc[target]
+                    if isinstance(m_bars.index, pd.MultiIndex): m_bars = m_bars.loc[target]
 
-                st.subheader(f"Технический срез: {target}")
-                col1, col2 = st.columns(2)
-                col1.write("Daily (Last 7d)")
-                col1.dataframe(d_bars[['open', 'high', 'low', 'close']].tail(7))
-                col2.write("Minute (Last 15m)")
-                col2.dataframe(m_bars[['open', 'close', 'volume']].tail(15))
+                    col1, col2 = st.columns(2)
+                    col1.metric("Цена", f"${m_bars['close'].iloc[-1]}", f"{round(((m_bars['close'].iloc[-1]/d_bars['open'].iloc[-1])-1)*100, 2)}%")
+                    
+                    st.divider()
+                    c1, c2 = st.columns(2)
+                    c1.write("📅 Daily (10 days)")
+                    c1.dataframe(d_bars[['open', 'high', 'low', 'close', 'volume']].tail(10))
+                    c2.write("⏱️ Minute (15 min)")
+                    c2.dataframe(m_bars[['open', 'high', 'low', 'close', 'volume']].tail(15))
 
-                ai_final = f"ДАННЫЕ ПО {target}\n\nDaily:\n{d_bars.tail(7).to_string()}\n\nMinute:\n{m_bars.tail(15).to_string()}"
-                st.subheader("📋 Данные для копирования (Индивидуально)")
-                st.code(ai_final, language="text")
+                    final_txt = f"ANALYSIS FOR {target}\n\nDAILY:\n{d_bars.tail(7).to_string()}\n\nMINUTE:\n{m_bars.tail(15).to_string()}"
+                    st.subheader("📋 Текст для чата с ИИ")
+                    st.code(final_txt)
             except Exception as e:
-                st.error(f"Ошибка сбора данных по {target}: {e}")
-
+                st.error(f"Данные по {target} временно недоступны. Попробуйте другой тикер.")
 else:
-    st.info("Введите API ключи слева или настройте Secrets в Streamlit Cloud.")
+    st.warning("👈 Введите ключи доступа Alpaca в боковой панели.")
