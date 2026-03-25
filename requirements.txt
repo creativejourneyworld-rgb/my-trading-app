@@ -3,6 +3,6 @@ pandas
 alpaca-py
 requests
 beautifulsoup4
-lxml
 plotly
-pandas_ta
+pandas-ta
+
