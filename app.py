@@ -1,140 +1,138 @@
 import streamlit as st
-
-# Проверка импортов (диагностика)
-try:
-    import pandas as pd
-    import requests
-    from bs4 import BeautifulSoup
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    import pandas_ta as ta
-    from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
-    from alpaca.data.timeframe import TimeFrame
-    from alpaca.data.historical import StockHistoricalDataClient
-    from datetime import datetime, timedelta, timezone
-    import re
-except ImportError as e:
-    st.error(f"❌ Ошибка установки библиотек: {e}")
-    st.info("Пожалуйста, проверьте requirements.txt и сделайте 'Reboot App' в панели управления Streamlit.")
-    st.stop()
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.enums import DataFeed
+from datetime import datetime, timedelta, timezone
+import re
 
 # --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
-st.set_page_config(page_title="Eagle AI Turbo Terminal", layout="wide", page_icon="🦅")
-st.title("🦅 Eagle AI Turbo Terminal v3.7")
+st.set_page_config(page_title="Eagle Real-Time Terminal", layout="wide")
+st.title("🦅 Eagle AI Terminal: Real-Time (IEX) + Smart Batch")
 
-# --- ИНИЦИАЛИЗАЦИЯ SESSION STATE ---
-if 'movers_df' not in st.session_state: st.session_state.movers_df = pd.DataFrame()
-if 'api_key' not in st.session_state: st.session_state.api_key = st.secrets.get("ALPACA_API_KEY", "")
-if 'api_secret' not in st.session_state: st.session_state.api_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
-
-# --- ФУНКЦИИ ---
+# --- СИСТЕМНЫЕ ФУНКЦИИ ---
 
 def extract_tickers(text):
-    potential = re.findall(r'\b[A-Z]{1,5}\b', text)
-    exclude = {'USD', 'VOL', 'LOW', 'HIGH', 'OPEN', 'CLOSE', 'P/E', 'EPS', 'CEO', 'NYSE', 'AMEX', 'NASD', 'BUY', 'SELL', 'DATE'}
-    return sorted(list(set(t for t in potential if t not in exclude)))
+    """ТРИЗ: Извлечение тикеров из любого мусора"""
+    potential_tickers = re.findall(r'\b[A-Z]{1,5}\b', text)
+    exclude = {'USD', 'VOL', 'LOW', 'HIGH', 'OPEN', 'CLOSE', 'P/E', 'EPS', 'CEO', 'NYSE', 'AMEX', 'NASD', 'DATE', 'TIME', 'BUY', 'SELL'}
+    return sorted(list(set(t for t in potential_tickers if t not in exclude)))
 
-def safe_get_df(df, ticker):
+def get_indices_stable(index_name):
+    """Исправленный метод получения индексов (обходим 403 ошибку)"""
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies" if index_name == "S&P 500" else "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
     try:
-        if isinstance(df.index, pd.MultiIndex):
-            return df.loc[ticker].copy()
-        return df.copy()
-    except:
-        return pd.DataFrame()
+        response = requests.get(url, headers=headers, timeout=10)
+        tables = pd.read_html(response.text)
+        df = tables[0]
+        col = 'Symbol' if 'Symbol' in df.columns else 'Ticker'
+        return df[col].tolist()[:100] # Берем топ-100 для скорости
+    except Exception as e:
+        st.error(f"Ошибка доступа к Wiki: {e}")
+        return []
 
-def fetch_bars(client, ticker, timeframe, days_back):
+def fetch_detailed_data(client, ticker):
+    """Вспомогательная функция для сбора Daily + Minute данных"""
     now = datetime.now(timezone.utc)
-    try:
-        req = StockBarsRequest(
-            symbol_or_symbols=ticker,
-            timeframe=timeframe,
-            start=now - timedelta(days=days_back),
-            feed='iex'
-        )
-        data = client.get_stock_bars(req).df
-        return safe_get_df(data, ticker)
-    except:
-        return pd.DataFrame()
-
-def draw_turbo_chart(df, ticker):
-    if df.empty or len(df) < 20: 
-        st.warning("Недостаточно данных для графика.")
-        return None
+    # Используем feed='iex' для Real-Time данных на бесплатном тарифе
+    d_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=ticker, timeframe=TimeFrame.Day, start=now-timedelta(days=30), feed='iex')).df
+    m_bars = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=ticker, timeframe=TimeFrame.Minute, start=now-timedelta(hours=8), feed='iex')).df
     
-    # Расчет индикаторов
-    df['SMA_20'] = ta.sma(df['close'], length=20)
-    df['SMA_50'] = ta.sma(df['close'], length=50)
-    df['RSI_14'] = ta.rsi(df['close'], length=14)
+    if isinstance(d_bars.index, pd.MultiIndex): d_bars = d_bars.loc[ticker]
+    if isinstance(m_bars.index, pd.MultiIndex): m_bars = m_bars.loc[ticker]
+    return d_bars, m_bars
 
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.05, 
-                        subplot_titles=(f'{ticker} Цена', 'Объем', 'RSI'),
-                        row_width=[0.2, 0.2, 0.6])
-
-    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Цена'), row=1, col=1)
-    if 'SMA_20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='yellow', width=1)), row=1, col=1)
-    if 'SMA_50' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='cyan', width=1)), row=1, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='Объем', marker_color='white', opacity=0.5), row=2, col=1)
-    
-    if 'RSI_14' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name='RSI', line=dict(color='magenta', width=1.5)), row=3, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
-
-    fig.update_layout(height=700, template='plotly_dark', xaxis_rangeslider_visible=False)
-    return fig
-
-# --- ИНТЕРФЕЙС ---
+# --- БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
-    st.header("🔐 Ключи")
-    st.session_state.api_key = st.text_input("Alpaca API Key", value=st.session_state.api_key, type="password")
-    st.session_state.api_secret = st.text_input("Alpaca Secret Key", value=st.session_state.api_secret, type="password")
+    st.header("🔐 Доступ Alpaca")
+    default_key = st.secrets.get("ALPACA_API_KEY", "")
+    default_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
+    api_key = st.text_input("API Key", value=default_key, type="password")
+    secret_key = st.text_input("Secret Key", value=default_secret, type="password")
     
     st.divider()
-    source = st.radio("Источник:", ["Умная вставка", "Индексы (Wiki)"])
-    if source == "Умная вставка":
-        raw_input = st.text_area("Вставь текст сюда:", height=100)
+    st.header("🎯 Источник")
+    source_type = st.radio("Метод:", ["Умная вставка", "Индексы", "Свой список"])
+    
+    if source_type == "Индексы":
+        category = st.selectbox("Индекс", ["S&P 500", "NASDAQ 100"])
+    elif source_type == "Свой список":
+        manual_tickers = st.text_area("Тикеры через пробел")
 
-if st.session_state.api_key and st.session_state.api_secret:
-    try:
-        client = StockHistoricalDataClient(st.session_state.api_key, st.session_state.api_secret)
-        t_scan, t_turbo = st.tabs(["🔍 Скринер", "🚀 ТУРБО"])
+# --- ОСНОВНАЯ ЛОГИКА ---
+if api_key and secret_key:
+    client = StockHistoricalDataClient(api_key, secret_key)
+    tab_scan, tab_analysis = st.tabs(["🔍 Поиск и Пул", "📊 Детальный Анализ"])
 
-        with t_scan:
-            if st.button("▶️ СКАНИРОВАТЬ"):
-                tickers = []
-                if source == "Умная вставка" and raw_input:
-                    tickers = extract_tickers(raw_input)
-                else:
-                    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    resp = requests.get(url, headers=headers)
-                    tickers = pd.read_html(resp.text, flavor='html.parser')[0]['Symbol'].tolist()[:50]
+    with tab_scan:
+        if source_type == "Умная вставка":
+            raw_text = st.text_area("Вставь сюда текст с Finviz/TradingView:", height=150)
+            if st.button("🚀 Извлечь и получить котировки (LIVE IEX)", use_container_width=True):
+                st.session_state.target_tickers = extract_tickers(raw_text)
+        elif source_type == "Индексы":
+            if st.button("🚀 Загрузить индекс (LIVE IEX)", use_container_width=True):
+                st.session_state.target_tickers = get_indices_stable(category)
+        else:
+            if st.button("🚀 Загрузить список", use_container_width=True):
+                st.session_state.target_tickers = manual_tickers.upper().split()
 
-                if tickers:
-                    snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=tickers, feed='iex'))
-                    rows = []
-                    for s, res in snaps.items():
-                        if res.daily_bar:
-                            chg = ((res.latest_trade.price / res.daily_bar.open) - 1) * 100
-                            rows.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(chg, 2), "Объем": res.daily_bar.volume})
-                    st.session_state.movers_df = pd.DataFrame(rows).sort_values("Изм %", ascending=False)
-                    st.dataframe(st.session_state.movers_df, use_container_width=True)
-
-        with t_turbo:
-            target = st.text_input("Тикер для ТУРБО:", value="NVDA").upper()
-            if st.button("🔥 ТУРБО СТАРТ"):
-                d = fetch_bars(client, target, TimeFrame.Day, 365)
-                h = fetch_bars(client, target, TimeFrame.Hour, 100)
-                m = fetch_bars(client, target, TimeFrame.Minute, 1)
+        # Получение Snapshot (Живые цены)
+        if 'target_tickers' in st.session_state and st.session_state.target_tickers:
+            try:
+                # ВАЖНО: feed='iex' дает 0 минут задержки для бесплатных ключей
+                snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=st.session_state.target_tickers, feed='iex'))
+                res_list = []
+                for s, res in snaps.items():
+                    if res.daily_bar:
+                        change = ((res.latest_trade.price - res.daily_bar.open) / res.daily_bar.open) * 100
+                        res_list.append({"Тикер": s, "Цена": res.latest_trade.price, "Изм %": round(change, 2), "Объем": res.daily_bar.volume})
                 
-                if not d.empty:
-                    st.metric("Цена", f"${d['close'].iloc[-1]}")
-                    fig = draw_turbo_chart(d, target)
-                    if fig: st.plotly_chart(fig, use_container_width=True)
-                    st.code(f"AI DATA:\n{d.tail(5).to_string()}\n\n{m.tail(5).to_string()}")
+                st.session_state.last_df = pd.DataFrame(res_list).sort_values("Изм %", ascending=False)
+                st.dataframe(st.session_state.last_df, use_container_width=True)
 
-    except Exception as e:
-        st.error(f"Ошибка: {e}")
+                # КНОПКИ ДЕЙСТВИЙ С ПУЛОМ
+                col_pool1, col_pool2 = st.columns(2)
+                
+                with col_pool1:
+                    if st.button("📦 Сформировать ОТЧЕТ ПО ВСЕМУ ПУЛУ (Daily+Min)"):
+                        with st.spinner("Сбор мега-отчета..."):
+                            full_report = "--- МЕГА-ОТЧЕТ ПО ПУЛУ ДЛЯ ИИ ---\n\n"
+                            for t in st.session_state.target_tickers[:10]: # Ограничение 10 для стабильности
+                                try:
+                                    d, m = fetch_detailed_data(client, t)
+                                    full_report += f"=== {t} ===\nDAILY:\n{d.tail(5).to_string()}\nMINUTE:\n{m.tail(10).to_string()}\n\n"
+                                except: continue
+                            st.code(full_report)
+
+                with col_pool2:
+                    selected_from_list = st.selectbox("Выбрать для детального анализа:", st.session_state.target_tickers)
+                    if st.button("🔎 Получить данные по акции"):
+                        st.session_state.analysis_target = selected_from_list
+                        st.info(f"Акция {selected_from_list} готова во второй вкладке!")
+
+            except Exception as e:
+                st.error(f"Ошибка Alpaca: {e}")
+
+    with tab_analysis:
+        # Либо вводим вручную, либо подхватываем из первой вкладки
+        target = st.text_input("Тикер для анализа:", value=st.session_state.get('analysis_target', ""), key="analysis_field").upper()
+        if target:
+            try:
+                d_bars, m_bars = fetch_detailed_data(client, target)
+                st.subheader(f"Технический срез: {target} (REAL-TIME IEX)")
+                c1, c2 = st.columns(2)
+                c1.write("Daily (Last 7d)")
+                c1.dataframe(d_bars[['open', 'high', 'low', 'close']].tail(7))
+                c2.write("Minute (Last 15m)")
+                c2.dataframe(m_bars[['open', 'close', 'volume']].tail(15))
+
+                ai_final = f"ДАННЫЕ ПО {target} (REAL-TIME IEX)\n\nDaily:\n{d_bars.tail(7).to_string()}\n\nMinute:\n{m_bars.tail(15).to_string()}"
+                st.code(ai_final, language="text")
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
 else:
-    st.info("Введите ключи слева.")
+    st.info("Введите API ключи Alpaca.")
